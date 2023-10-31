@@ -137,6 +137,21 @@ def test_relax_dynamo_dynamic():
         opt_model(inp).detach().numpy(), model(inp).detach().numpy(), rtol=1e-5, atol=1e-5
     )
 
+    def Func1(x, y):
+        z = torch.cat([x, y])
+        if z.size(0) > 5:
+            return z.mul(2)
+        else:
+            return z.add(2)
+
+    opt_func = torch.compile(Func1, backend=relax_dynamo(), dynamic=True)
+
+    for s in (2, 4):
+        x = torch.randn(s, 100)
+        y = torch.randn(s, 100)
+        with torch.no_grad():
+            tvm.testing.assert_allclose(opt_func(x, y), opt_func(x, y))
+
 
 def test_subgraph_capture():
     import torch
@@ -435,6 +450,105 @@ def test_masked_fill():
     verify_dynamo_model(
         InplaceMaskedFill(), [([256, 256], "bool"), ([256, 256], "float32")], {}, Expected1
     )
+
+
+@tvm.testing.requires_gpu
+def test_getitem():
+    import torch
+    from torch.nn import Module
+
+    class Select1(Module):
+        def forward(self, input1, input2):
+            result = input1[:, input2.argmax(dim=-1), :]
+            return result
+
+    @I.ir_module
+    class Expected1:
+        @R.function
+        def main(
+            inp_0: R.Tensor((1, 77, 1280), dtype="float32"),
+            inp_1: R.Tensor((1, 77), dtype="float32"),
+        ) -> R.Tensor((1, 1, 1280), dtype="float32"):
+            with R.dataflow():
+                lv: R.Tensor((1,), dtype="int64") = R.argmax(inp_1, axis=-1, keepdims=False)
+                lv1: R.Tensor((1, 1, 1280), dtype="float32") = R.take(inp_0, lv, axis=1)
+                lv2: R.Tensor((1, 1, 1280), dtype="float32") = R.strided_slice(
+                    lv1,
+                    axes=[0, 2],
+                    begin=[0, 0],
+                    end=[1, 1280],
+                    strides=[1, 1],
+                    assume_inbound=False,
+                )
+                lv3: R.Tensor((1, 1, 1280), dtype="float32") = R.reshape(lv2, R.shape([1, 1, 1280]))
+                gv: R.Tensor((1, 1, 1280), dtype="float32") = lv3
+                R.output(gv)
+            return gv
+
+    @I.ir_module
+    class Expected2:
+        @R.function
+        def main(
+            inp_0: R.Tensor((1, 77, 1280), dtype="float32")
+        ) -> R.Tensor((1, 77, 1280), dtype="float32"):
+            with R.dataflow():
+                lv: R.Tensor((1,), dtype="int64") = R.arange(
+                    R.prim_value(0), R.prim_value(1), R.prim_value(1), dtype="int64"
+                )
+                lv1: R.Tensor((1, 77, 1280), dtype="float32") = R.take(inp_0, lv, axis=0)
+                lv2: R.Tensor((1, 77, 1280), dtype="float32") = R.strided_slice(
+                    lv1,
+                    axes=[1, 2],
+                    begin=[0, 0],
+                    end=[77, 1280],
+                    strides=[1, 1],
+                    assume_inbound=False,
+                )
+                lv3: R.Tensor((1, 77, 1280), dtype="float32") = R.reshape(
+                    lv2, R.shape([1, 77, 1280])
+                )
+                gv: R.Tensor((1, 77, 1280), dtype="float32") = lv3
+                R.output(gv)
+            return gv
+
+    class Select2(Module):
+        def forward(self, input1):
+            result = input1[
+                torch.arange(1),
+            ]
+            return result
+
+    verify_dynamo_model(
+        Select1(), [([1, 77, 1280], "float32"), ([1, 77], "float32")], {}, Expected1
+    )
+    verify_dynamo_model(Select2(), [([1, 77, 1280], "float32")], {}, Expected2)
+
+
+@tvm.testing.requires_gpu
+def test_arange():
+    import torch
+    from torch.nn import Module
+
+    class Arange1(Module):
+        def forward(self, input0):
+            mask_cond = torch.arange(input0.size(-1))
+            result = mask_cond + 1
+            return result
+
+    @I.ir_module
+    class Expected1:
+        @R.function
+        def main(inp_0: R.Tensor((1, 77), dtype="float32")) -> R.Tensor((77,), dtype="int64"):
+            with R.dataflow():
+                lv: R.Tensor((77,), dtype="int64") = R.arange(
+                    R.prim_value(0), R.prim_value(77), R.prim_value(1), dtype="int64"
+                )
+                lv1: R.Tensor((77,), dtype="int64") = R.add(lv, R.const(1, "int64"))
+                gv: R.Tensor((77,), dtype="int64") = lv1
+                R.output(gv)
+            return gv
+
+    verify_dynamo_model(Arange1(), [([1, 77], "float32")], {}, Expected1)
 
 
 if __name__ == "__main__":

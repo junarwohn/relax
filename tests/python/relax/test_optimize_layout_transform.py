@@ -26,19 +26,15 @@ from tvm.script import ir as I, tir as T, relax as R
 
 
 def _run_pass_compare_output(Before, Expected):
-    fused_mod = OptimizeLayoutTransform()(Before)
-    if not relax.analysis.well_formed(fused_mod):
-        print("IRModule is not well-formed")
+    After = tvm.ir.transform.Sequential(
+        [
+            OptimizeLayoutTransform(),
+            DeadCodeElimination(),
+            FuseTIR(),
+        ]
+    )(Before)
 
-    fused_mode = DeadCodeElimination()(fused_mod)
-    if not relax.analysis.well_formed(fused_mod):
-        print("IRModule is not well-formed")
-
-    fused_mod = FuseTIR()(fused_mod)
-    if not relax.analysis.well_formed(fused_mod):
-        print("IRModule is not well-formed")
-
-    tvm.ir.assert_structural_equal(Expected, fused_mod)
+    tvm.ir.assert_structural_equal(Expected, After)
 
 
 def test_optimize_transform_layout_pass_one_arg():
@@ -129,18 +125,14 @@ def test_optimize_transform_layout_pass_one_arg():
                     (lv, lv1),
                     out_sinfo=R.Tensor((4, 4), dtype="float32"),
                 )
-                lv4: R.Tensor((4, 4), dtype="float32") = R.layout_transform(
-                    y, index_map=lambda i: (i // 4, i % 4), pad_value=None
-                )
                 lv5 = R.call_tir(
                     Expected.relax_add_replacement,
-                    (lv4, lv2),
+                    (lv1, lv2),
                     out_sinfo=R.Tensor((4, 4), dtype="float32"),
                 )
-                lv2_1: R.Tensor((16,), dtype="float32") = R.layout_transform(
+                gv: R.Tensor((16,), dtype="float32") = R.layout_transform(
                     lv5, index_map=lambda axis0, axis1: (axis0 * 4 + axis1,), pad_value=None
                 )
-                gv: R.Tensor((16,), dtype="float32") = lv2_1
                 R.output(gv)
             return gv
 
@@ -263,10 +255,9 @@ def test_optimize_transform_layout_pass_two_args():
                     (lv3, lv4),
                     out_sinfo=R.Tensor((4, 4), dtype="float32"),
                 )
-                lv6: R.Tensor((16,), dtype="float32") = R.layout_transform(
+                gv: R.Tensor((16,), dtype="float32") = R.layout_transform(
                     lv5, index_map=lambda axis0, axis1: (axis0 * 4 + axis1,), pad_value=None
                 )
-                gv: R.Tensor((16,), dtype="float32") = lv6
                 R.output(gv)
             return gv
 
@@ -406,10 +397,9 @@ def test_tranform_layout_tir_remove_pad_transform_layout():
                     pad_value=None,
                     axis_separators=[],
                 )
-                lv_2 = R.call_tir(
+                gv = R.call_tir(
                     Expected.remove_pad, (lv5,), out_sinfo=R.Tensor((14,), dtype="float32")
                 )
-                gv: R.Tensor((14,), dtype="float32") = lv_2
                 R.output(gv)
             return gv
 
